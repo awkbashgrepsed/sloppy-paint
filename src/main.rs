@@ -186,26 +186,71 @@ impl PaintApp {
     }
 
     fn blend_colors(&self, behind: Color32, on_top: Color32) -> Color32 {
+        let [br, bg, bb, ba] = behind.to_srgba_unmultiplied();
+        let [tr, tg, tb, ta] = on_top.to_srgba_unmultiplied();
+
         match self.blend_mode {
-            BlendMode::Normal => behind.blend(on_top),
+            BlendMode::Normal => {
+                // Standard source-over alpha compositing.
+                let source_alpha = ta as f32 / 255.0;
+                let behind_alpha = ba as f32 / 255.0;
+                let out_alpha = source_alpha + behind_alpha * (1.0 - source_alpha);
+
+                if out_alpha <= 0.0 {
+                    return Color32::TRANSPARENT;
+                }
+
+                let r = (tr as f32 * source_alpha
+                    + br as f32 * behind_alpha * (1.0 - source_alpha))
+                    / out_alpha;
+                let g = (tg as f32 * source_alpha
+                    + bg as f32 * behind_alpha * (1.0 - source_alpha))
+                    / out_alpha;
+                let b = (tb as f32 * source_alpha
+                    + bb as f32 * behind_alpha * (1.0 - source_alpha))
+                    / out_alpha;
+
+                Color32::from_rgba_unmultiplied(
+                    r.round().clamp(0.0, 255.0) as u8,
+                    g.round().clamp(0.0, 255.0) as u8,
+                    b.round().clamp(0.0, 255.0) as u8,
+                    (out_alpha * 255.0).round().clamp(0.0, 255.0) as u8,
+                )
+            }
             BlendMode::Additive => {
-                let a = behind.to_array();
-                let b = on_top.to_array();
-                Color32::from_rgba_premultiplied(
-                    a[0].saturating_add(b[0]),
-                    a[1].saturating_add(b[1]),
-                    a[2].saturating_add(b[2]),
-                    a[3].max(b[3]),
+                // Add the brush's visible contribution instead of subtracting
+                // from the existing pixel. Alpha controls how much is added.
+                let strength = ta as u16;
+                let r = br as u16 + (tr as u16 * strength / 255);
+                let g = bg as u16 + (tg as u16 * strength / 255);
+                let b = bb as u16 + (tb as u16 * strength / 255);
+                let a = (ba as u16).max(ta as u16);
+
+                Color32::from_rgba_unmultiplied(
+                    r.min(255) as u8,
+                    g.min(255) as u8,
+                    b.min(255) as u8,
+                    a.min(255) as u8,
                 )
             }
             BlendMode::Subtractive => {
-                let a = behind.to_array();
-                let b = on_top.to_array();
-                Color32::from_rgba_premultiplied(
-                    a[0].saturating_sub(b[0]),
-                    a[1].saturating_sub(b[1]),
-                    a[2].saturating_sub(b[2]),
-                    a[3].max(b[3]),
+                // Subtractive mode is pigment-style mixing, not arithmetic
+                // subtraction. Each RGB channel represents light that remains
+                // after the two colors are mixed, so the darker contribution
+                // wins for each channel.
+                let r = br.min(tr);
+                let g = bg.min(tg);
+                let b = bb.min(tb);
+
+                let source_alpha = ta as f32 / 255.0;
+                let behind_alpha = ba as f32 / 255.0;
+                let out_alpha = source_alpha + behind_alpha * (1.0 - source_alpha);
+
+                Color32::from_rgba_unmultiplied(
+                    r,
+                    g,
+                    b,
+                    (out_alpha * 255.0).round().clamp(0.0, 255.0) as u8,
                 )
             }
         }
