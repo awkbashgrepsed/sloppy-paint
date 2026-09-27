@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, Pos2, Sense, TextureHandle, Vec2};
+use eframe::egui::{self, Color32, PointerButton, Pos2, Sense, TextureHandle, Vec2};
 use eframe::{App, CreationContext, Frame, NativeOptions};
 use image::{ImageBuffer, Rgba};
 use rfd::FileDialog;
@@ -26,7 +26,9 @@ struct PaintApp {
     canvas_height: usize,
     texture: Option<TextureHandle>,
     tool: Tool,
-    color: Color32,
+    left_color: Color32,
+    right_color: Color32,
+    drag_color: Option<Color32>,
     brush_size: f32,
     drag_start: Option<Pos2>,
     last_canvas_pos: Option<Pos2>,
@@ -43,7 +45,9 @@ impl PaintApp {
             canvas_height: INITIAL_HEIGHT,
             texture: None,
             tool: Tool::Pencil,
-            color: Color32::BLACK,
+            left_color: Color32::BLACK,
+            right_color: Color32::WHITE,
+            drag_color: None,
             brush_size: 4.0,
             drag_start: None,
             last_canvas_pos: None,
@@ -149,11 +153,11 @@ impl PaintApp {
         }
     }
 
-    fn draw_shape(&mut self, start: Pos2, end: Pos2) {
+    fn draw_shape(&mut self, start: Pos2, end: Pos2, color: Color32) {
         match self.tool {
-            Tool::Line => self.draw_line(start, end, self.color),
-            Tool::Rectangle => self.draw_rectangle(start, end, self.color),
-            Tool::Ellipse => self.draw_ellipse(start, end, self.color),
+            Tool::Line => self.draw_line(start, end, color),
+            Tool::Rectangle => self.draw_rectangle(start, end, color),
+            Tool::Ellipse => self.draw_ellipse(start, end, color),
             _ => {}
         }
     }
@@ -196,7 +200,7 @@ impl PaintApp {
         }
     }
 
-    fn flood_fill(&mut self, start_x: i32, start_y: i32) {
+    fn flood_fill(&mut self, start_x: i32, start_y: i32, color: Color32) {
         if start_x < 0
             || start_y < 0
             || start_x >= self.canvas_width as i32
@@ -206,13 +210,13 @@ impl PaintApp {
         }
 
         let target = self.pixel(start_x, start_y);
-        if target == self.color {
+        if target == color {
             return;
         }
 
         let mut queue = VecDeque::new();
         queue.push_back((start_x, start_y));
-        self.set_pixel(start_x, start_y, self.color);
+        self.set_pixel(start_x, start_y, color);
 
         while let Some((x, y)) = queue.pop_front() {
             for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
@@ -222,7 +226,7 @@ impl PaintApp {
                     && ny < self.canvas_height as i32
                     && self.pixel(nx, ny) == target
                 {
-                    self.set_pixel(nx, ny, self.color);
+                    self.set_pixel(nx, ny, color);
                     queue.push_back((nx, ny));
                 }
             }
@@ -319,10 +323,11 @@ impl PaintApp {
         rect: egui::Rect,
         start: Pos2,
         end: Pos2,
+        color: Color32,
     ) {
         let start = Self::canvas_to_screen(rect, start, self.canvas_width, self.canvas_height);
         let end = Self::canvas_to_screen(rect, end, self.canvas_width, self.canvas_height);
-        let stroke = egui::Stroke::new(self.brush_size.max(1.0), self.color);
+        let stroke = egui::Stroke::new(self.brush_size.max(1.0), color);
 
         match self.tool {
             Tool::Line => {
@@ -400,7 +405,19 @@ impl App for PaintApp {
                 ui.add(egui::Slider::new(&mut self.brush_size, 1.0..=64.0).suffix(" px"));
 
                 ui.separator();
-                ui.label("Color:");
+                ui.label("Colors:");
+
+                ui.label("L");
+                let left_picker = ui.color_edit_button_srgba(&mut self.left_color);
+                if left_picker.clicked() {
+                    self.left_color = left_picker.color;
+                }
+
+                ui.label("R");
+                let right_picker = ui.color_edit_button_srgba(&mut self.right_color);
+                if right_picker.clicked() {
+                    self.right_color = right_picker.color;
+                }
 
                 for color in [
                     Color32::BLACK,
@@ -415,10 +432,29 @@ impl App for PaintApp {
                     Color32::from_rgb(128, 0, 255),
                     Color32::from_rgb(255, 0, 128),
                 ] {
-                    if Self::color_button(ui, color) {
-                        self.color = color;
+                    let response = ui.add(
+                        egui::Button::new("")
+                            .fill(color)
+                            .min_size(Vec2::splat(20.0)),
+                    );
+                    if response.clicked_by(PointerButton::Primary) {
+                        self.left_color = color;
+                    }
+                    if response.clicked_by(PointerButton::Secondary) {
+                        self.right_color = color;
                     }
                 }
+
+                ui.separator();
+                ui.label(format!(
+                    "L: #{:02X}{:02X}{:02X}  R: #{:02X}{:02X}{:02X}",
+                    self.left_color.r(),
+                    self.left_color.g(),
+                    self.left_color.b(),
+                    self.right_color.r(),
+                    self.right_color.g(),
+                    self.right_color.b()
+                ));
 
                 ui.separator();
                 ui.label(format!("{} × {}", self.canvas_width, self.canvas_height));
@@ -455,86 +491,133 @@ impl App for PaintApp {
                 });
             }
 
-            if response.drag_started() {
-                if let Some(pointer) = response.interact_pointer_pos() {
-                    if let Some(canvas_pos) = Self::canvas_position(rect, pointer, self.canvas_width, self.canvas_height) {
-                        self.drag_start = Some(canvas_pos);
-                        self.last_canvas_pos = Some(canvas_pos);
+            let mut begin_drag = |button: PointerButton, color: Color32| {
+                if response.drag_started_by(button) {
+                    if let Some(pointer) = response.interact_pointer_pos() {
+                        if let Some(canvas_pos) = Self::canvas_position(
+                            rect,
+                            pointer,
+                            self.canvas_width,
+                            self.canvas_height,
+                        ) {
+                            self.drag_start = Some(canvas_pos);
+                            self.last_canvas_pos = Some(canvas_pos);
+                            self.drag_color = Some(color);
 
-                        match self.tool {
-                            Tool::Pencil => self.draw_dot(canvas_pos, self.color),
-                            Tool::Eraser => self.draw_dot(canvas_pos, Color32::WHITE),
-                            _ => {}
+                            match self.tool {
+                                Tool::Pencil => self.draw_dot(canvas_pos, color),
+                                Tool::Eraser => self.draw_dot(canvas_pos, Color32::WHITE),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            };
+
+            begin_drag(PointerButton::Primary, self.left_color);
+            begin_drag(PointerButton::Secondary, self.right_color);
+
+            for (button, color) in [
+                (PointerButton::Primary, self.left_color),
+                (PointerButton::Secondary, self.right_color),
+            ] {
+                if response.clicked_by(button) {
+                    if let Some(pointer) = response.interact_pointer_pos() {
+                        if let Some(canvas_pos) = Self::canvas_position(
+                            rect,
+                            pointer,
+                            self.canvas_width,
+                            self.canvas_height,
+                        ) {
+                            match self.tool {
+                                Tool::ColorPicker => {
+                                    let x = canvas_pos.x.floor() as i32;
+                                    let y = canvas_pos.y.floor() as i32;
+                                    if x >= 0
+                                        && y >= 0
+                                        && x < self.canvas_width as i32
+                                        && y < self.canvas_height as i32
+                                    {
+                                        let picked = self.pixel(x, y);
+                                        if button == PointerButton::Primary {
+                                            self.left_color = picked;
+                                        } else {
+                                            self.right_color = picked;
+                                        }
+                                    }
+                                }
+                                Tool::Fill => {
+                                    self.flood_fill(
+                                        canvas_pos.x.floor() as i32,
+                                        canvas_pos.y.floor() as i32,
+                                        color,
+                                    );
+                                    self.update_texture(ctx);
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 }
             }
 
-            if response.clicked() {
-                if let Some(pointer) = response.interact_pointer_pos() {
-                    if let Some(canvas_pos) = Self::canvas_position(rect, pointer, self.canvas_width, self.canvas_height) {
-                        match self.tool {
-                            Tool::ColorPicker => {
-                                let x = canvas_pos.x.floor() as i32;
-                                let y = canvas_pos.y.floor() as i32;
-                                if x >= 0
-                                    && y >= 0
-                                    && x < self.canvas_width as i32
-                                    && y < self.canvas_height as i32
-                                {
-                                    self.color = self.pixel(x, y);
+            for (button, color) in [
+                (PointerButton::Primary, self.left_color),
+                (PointerButton::Secondary, self.right_color),
+            ] {
+                if response.dragged_by(button) {
+                    if let Some(pointer) = response.interact_pointer_pos() {
+                        if let Some(canvas_pos) = Self::canvas_position(
+                            rect,
+                            pointer,
+                            self.canvas_width,
+                            self.canvas_height,
+                        ) {
+                            match self.tool {
+                                Tool::Pencil => {
+                                    if let Some(previous) = self.last_canvas_pos {
+                                        self.draw_line(previous, canvas_pos, color);
+                                    }
+                                    self.last_canvas_pos = Some(canvas_pos);
+                                    self.update_texture(ctx);
                                 }
+                                Tool::Eraser => {
+                                    if let Some(previous) = self.last_canvas_pos {
+                                        self.draw_line(previous, canvas_pos, Color32::WHITE);
+                                    }
+                                    self.last_canvas_pos = Some(canvas_pos);
+                                    self.update_texture(ctx);
+                                }
+                                Tool::Line | Tool::Rectangle | Tool::Ellipse => {}
+                                _ => {}
                             }
-                            Tool::Fill => {
-                                self.flood_fill(
-                                    canvas_pos.x.floor() as i32,
-                                    canvas_pos.y.floor() as i32,
-                                );
-                                self.update_texture(ctx);
-                            }
-                            _ => {}
                         }
                     }
                 }
             }
 
-            if response.dragged() {
-                if let Some(pointer) = response.interact_pointer_pos() {
-                    if let Some(canvas_pos) = Self::canvas_position(rect, pointer, self.canvas_width, self.canvas_height) {
-                        match self.tool {
-                            Tool::Pencil => {
-                                if let Some(previous) = self.last_canvas_pos {
-                                    self.draw_line(previous, canvas_pos, self.color);
-                                }
-                                self.last_canvas_pos = Some(canvas_pos);
-                                self.update_texture(ctx);
-                            }
-                            Tool::Eraser => {
-                                if let Some(previous) = self.last_canvas_pos {
-                                    self.draw_line(previous, canvas_pos, Color32::WHITE);
-                                }
-                                self.last_canvas_pos = Some(canvas_pos);
-                                self.update_texture(ctx);
-                            }
-                            Tool::Line | Tool::Rectangle | Tool::Ellipse => {}
-                            _ => {}
-                        }
-                    }
-                }
-            }
-
-            if response.drag_stopped() {
+            if response.drag_stopped_by(PointerButton::Primary)
+                || response.drag_stopped_by(PointerButton::Secondary)
+            {
                 if let Some(start) = self.drag_start.take() {
                     if let Some(pointer) = response.interact_pointer_pos() {
-                        if let Some(end) = Self::canvas_position(rect, pointer, self.canvas_width, self.canvas_height) {
+                        if let Some(end) = Self::canvas_position(
+                            rect,
+                            pointer,
+                            self.canvas_width,
+                            self.canvas_height,
+                        ) {
                             if self.is_shape_tool() {
-                                self.draw_shape(start, end);
-                                self.update_texture(ctx);
+                                if let Some(color) = self.drag_color {
+                                    self.draw_shape(start, end, color);
+                                    self.update_texture(ctx);
+                                }
                             }
                         }
                     }
                 }
                 self.last_canvas_pos = None;
+                self.drag_color = None;
             }
 
             if self.is_shape_tool() {
@@ -542,7 +625,9 @@ impl App for PaintApp {
                     (self.drag_start, response.hover_pos())
                 {
                     if let Some(end) = Self::canvas_position(rect, pointer, self.canvas_width, self.canvas_height) {
-                        self.draw_shape_preview(&painter, rect, start, end);
+                        if let Some(color) = self.drag_color {
+                            self.draw_shape_preview(&painter, rect, start, end, color);
+                        }
                     }
                 }
             }
