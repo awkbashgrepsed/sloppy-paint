@@ -417,7 +417,6 @@ impl App for PaintApp {
                 ] {
                     if Self::color_button(ui, color) {
                         self.color = color;
-                        self.tool = Tool::Pencil;
                     }
                 }
 
@@ -463,6 +462,18 @@ impl App for PaintApp {
                         self.last_canvas_pos = Some(canvas_pos);
 
                         match self.tool {
+                            Tool::Pencil => self.draw_dot(canvas_pos, self.color),
+                            Tool::Eraser => self.draw_dot(canvas_pos, Color32::WHITE),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            if response.clicked() {
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    if let Some(canvas_pos) = Self::canvas_position(rect, pointer, self.canvas_width, self.canvas_height) {
+                        match self.tool {
                             Tool::ColorPicker => {
                                 let x = canvas_pos.x.floor() as i32;
                                 let y = canvas_pos.y.floor() as i32;
@@ -472,7 +483,6 @@ impl App for PaintApp {
                                     && y < self.canvas_height as i32
                                 {
                                     self.color = self.pixel(x, y);
-                                    self.tool = Tool::Pencil;
                                 }
                             }
                             Tool::Fill => {
@@ -482,8 +492,6 @@ impl App for PaintApp {
                                 );
                                 self.update_texture(ctx);
                             }
-                            Tool::Pencil => self.draw_dot(canvas_pos, self.color),
-                            Tool::Eraser => self.draw_dot(canvas_pos, Color32::WHITE),
                             _ => {}
                         }
                     }
