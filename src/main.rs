@@ -402,10 +402,11 @@ impl PaintApp {
         for y in 0..self.canvas_height {
             for x in 0..self.canvas_width {
                 let pixel = self.pixels[y * self.canvas_width + x];
+                let [r, g, b, a] = pixel.to_srgba_unmultiplied();
                 output.put_pixel(
                     x as u32,
                     y as u32,
-                    Rgba([pixel.r(), pixel.g(), pixel.b(), pixel.a()]),
+                    Rgba([r, g, b, a]),
                 );
             }
         }
