@@ -1,0 +1,9 @@
+[package]
+name = "sloppy-paint"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.33"
+image = { version = "0.25", default-features = false, features = ["png"] }
+rfd = "0.15"
