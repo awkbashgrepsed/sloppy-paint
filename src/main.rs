@@ -485,6 +485,9 @@ impl App for PaintApp {
                 });
             }
 
+            let left_color = self.left_color;
+            let right_color = self.right_color;
+
             let mut begin_drag = |button: PointerButton, color: Color32| {
                 if response.drag_started_by(button) {
                     if let Some(pointer) = response.interact_pointer_pos() {
@@ -508,8 +511,8 @@ impl App for PaintApp {
                 }
             };
 
-            begin_drag(PointerButton::Primary, self.left_color);
-            begin_drag(PointerButton::Secondary, self.right_color);
+            begin_drag(PointerButton::Primary, left_color);
+            begin_drag(PointerButton::Secondary, right_color);
 
             for (button, color) in [
                 (PointerButton::Primary, self.left_color),
