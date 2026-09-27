@@ -229,19 +229,22 @@ impl PaintApp {
         }
     }
 
-    fn canvas_position(rect: egui::Rect, pointer: Pos2) -> Option<Pos2> {
+    fn canvas_position(rect: egui::Rect, pointer: Pos2, width: usize, height: usize) -> Option<Pos2> {
         if !rect.contains(pointer) {
             return None;
         }
 
         Some(Pos2::new(
-            (pointer.x - rect.left()) * 1.0,
-            (pointer.y - rect.top()) * 1.0,
+            (pointer.x - rect.left()) * width as f32 / rect.width(),
+            (pointer.y - rect.top()) * height as f32 / rect.height(),
         ))
     }
 
-    fn canvas_to_screen(rect: egui::Rect, point: Pos2) -> Pos2 {
-        Pos2::new(rect.left() + point.x, rect.top() + point.y)
+    fn canvas_to_screen(rect: egui::Rect, point: Pos2, width: usize, height: usize) -> Pos2 {
+        Pos2::new(
+            rect.left() + point.x * rect.width() / width as f32,
+            rect.top() + point.y * rect.height() / height as f32,
+        )
     }
 
     fn save_png(&self) {
@@ -317,8 +320,8 @@ impl PaintApp {
         start: Pos2,
         end: Pos2,
     ) {
-        let start = Self::canvas_to_screen(rect, start);
-        let end = Self::canvas_to_screen(rect, end);
+        let start = Self::canvas_to_screen(rect, start, self.canvas_width, self.canvas_height);
+        let end = Self::canvas_to_screen(rect, end, self.canvas_width, self.canvas_height);
         let stroke = egui::Stroke::new(self.brush_size.max(1.0), self.color);
 
         match self.tool {
@@ -425,14 +428,11 @@ impl App for PaintApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let available = ui.available_size();
-            let canvas_size = Vec2::new(
-                self.canvas_width as f32,
-                self.canvas_height as f32,
-            );
-            let display_size = Vec2::new(
-                canvas_size.x.min(available.x - RESIZE_HANDLE_SIZE),
-                canvas_size.y.min(available.y - RESIZE_HANDLE_SIZE),
-            );
+            let canvas_size = Vec2::new(self.canvas_width as f32, self.canvas_height as f32);
+            let max_width = (available.x - RESIZE_HANDLE_SIZE).max(1.0);
+            let max_height = (available.y - RESIZE_HANDLE_SIZE).max(1.0);
+            let scale = (max_width / canvas_size.x).min(max_height / canvas_size.y).min(1.0);
+            let display_size = canvas_size * scale;
 
             let (response, painter) =
                 ui.allocate_painter(display_size, Sense::click_and_drag());
@@ -458,7 +458,7 @@ impl App for PaintApp {
 
             if response.drag_started() {
                 if let Some(pointer) = response.interact_pointer_pos() {
-                    if let Some(canvas_pos) = Self::canvas_position(rect, pointer) {
+                    if let Some(canvas_pos) = Self::canvas_position(rect, pointer, self.canvas_width, self.canvas_height) {
                         self.drag_start = Some(canvas_pos);
                         self.last_canvas_pos = Some(canvas_pos);
 
@@ -548,12 +548,12 @@ impl App for PaintApp {
 
             if let Some(pointer) = response.hover_pos() {
                 if let Some(canvas_pos) = Self::canvas_position(rect, pointer) {
-                    let radius = self.brush_size / 2.0;
+                    let radius = self.brush_size * scale / 2.0;
                     let screen_radius = radius.min(32.0);
 
                     if matches!(self.tool, Tool::Pencil | Tool::Eraser) {
                         painter.circle_stroke(
-                            Self::canvas_to_screen(rect, canvas_pos),
+                            Self::canvas_to_screen(rect, canvas_pos, self.canvas_width, self.canvas_height),
                             screen_radius.max(1.0),
                             egui::Stroke::new(1.0, Color32::BLACK),
                         );
@@ -593,10 +593,10 @@ impl App for PaintApp {
                     self.resize_original_size,
                     handle_response.interact_pointer_pos(),
                 ) {
-                    let width = (original.0 as f32 + pointer.x - start.x)
+                    let width = (original.0 as f32 + (pointer.x - start.x) / scale)
                         .round()
                         .max(MIN_CANVAS_SIZE as f32) as usize;
-                    let height = (original.1 as f32 + pointer.y - start.y)
+                    let height = (original.1 as f32 + (pointer.y - start.y) / scale)
                         .round()
                         .max(MIN_CANVAS_SIZE as f32) as usize;
 
