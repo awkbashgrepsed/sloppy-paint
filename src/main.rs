@@ -2,34 +2,54 @@ use eframe::egui::{self, Color32, Pos2, Sense, TextureHandle, Vec2};
 use eframe::{App, CreationContext, Frame, NativeOptions};
 use image::{ImageBuffer, Rgba};
 use rfd::FileDialog;
+use std::collections::VecDeque;
 
-const CANVAS_WIDTH: usize = 1000;
-const CANVAS_HEIGHT: usize = 700;
+const INITIAL_WIDTH: usize = 1000;
+const INITIAL_HEIGHT: usize = 700;
+const MIN_CANVAS_SIZE: usize = 32;
+const RESIZE_HANDLE_SIZE: f32 = 12.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tool {
     Pencil,
     Eraser,
+    ColorPicker,
+    Fill,
+    Line,
+    Rectangle,
+    Ellipse,
 }
 
 struct PaintApp {
     pixels: Vec<Color32>,
+    canvas_width: usize,
+    canvas_height: usize,
     texture: Option<TextureHandle>,
     tool: Tool,
     color: Color32,
     brush_size: f32,
+    drag_start: Option<Pos2>,
     last_canvas_pos: Option<Pos2>,
+    resizing: bool,
+    resize_start: Option<Pos2>,
+    resize_original_size: Option<(usize, usize)>,
 }
 
 impl PaintApp {
     fn new(cc: &CreationContext<'_>) -> Self {
         let mut app = Self {
-            pixels: vec![Color32::WHITE; CANVAS_WIDTH * CANVAS_HEIGHT],
+            pixels: vec![Color32::WHITE; INITIAL_WIDTH * INITIAL_HEIGHT],
+            canvas_width: INITIAL_WIDTH,
+            canvas_height: INITIAL_HEIGHT,
             texture: None,
             tool: Tool::Pencil,
             color: Color32::BLACK,
             brush_size: 4.0,
+            drag_start: None,
             last_canvas_pos: None,
+            resizing: false,
+            resize_start: None,
+            resize_original_size: None,
         };
 
         app.update_texture(&cc.egui_ctx);
@@ -38,7 +58,7 @@ impl PaintApp {
 
     fn update_texture(&mut self, ctx: &egui::Context) {
         let image = egui::ColorImage::new(
-            [CANVAS_WIDTH, CANVAS_HEIGHT],
+            [self.canvas_width, self.canvas_height],
             self.pixels.clone(),
         );
 
@@ -57,27 +77,52 @@ impl PaintApp {
         self.pixels.fill(Color32::WHITE);
     }
 
+    fn new_canvas(&mut self, width: usize, height: usize) {
+        self.canvas_width = width.max(MIN_CANVAS_SIZE);
+        self.canvas_height = height.max(MIN_CANVAS_SIZE);
+        self.pixels = vec![Color32::WHITE; self.canvas_width * self.canvas_height];
+    }
+
+    fn resize_canvas(&mut self, width: usize, height: usize) {
+        let width = width.max(MIN_CANVAS_SIZE);
+        let height = height.max(MIN_CANVAS_SIZE);
+
+        let mut new_pixels = vec![Color32::WHITE; width * height];
+        let copy_width = self.canvas_width.min(width);
+        let copy_height = self.canvas_height.min(height);
+
+        for y in 0..copy_height {
+            let old_start = y * self.canvas_width;
+            let new_start = y * width;
+            new_pixels[new_start..new_start + copy_width]
+                .copy_from_slice(&self.pixels[old_start..old_start + copy_width]);
+        }
+
+        self.canvas_width = width;
+        self.canvas_height = height;
+        self.pixels = new_pixels;
+    }
+
     fn set_pixel(&mut self, x: i32, y: i32, color: Color32) {
         if x >= 0
             && y >= 0
-            && x < CANVAS_WIDTH as i32
-            && y < CANVAS_HEIGHT as i32
+            && x < self.canvas_width as i32
+            && y < self.canvas_height as i32
         {
-            self.pixels[y as usize * CANVAS_WIDTH + x as usize] = color;
+            self.pixels[y as usize * self.canvas_width + x as usize] = color;
         }
     }
 
-    fn draw_dot(&mut self, center: Pos2) {
+    fn pixel(&self, x: i32, y: i32) -> Color32 {
+        self.pixels[y as usize * self.canvas_width + x as usize]
+    }
+
+    fn draw_dot(&mut self, center: Pos2, color: Color32) {
         let radius = self.brush_size / 2.0;
         let min_x = (center.x - radius - 1.0).floor() as i32;
         let max_x = (center.x + radius + 1.0).ceil() as i32;
         let min_y = (center.y - radius - 1.0).floor() as i32;
         let max_y = (center.y + radius + 1.0).ceil() as i32;
-
-        let draw_color = match self.tool {
-            Tool::Pencil => self.color,
-            Tool::Eraser => Color32::WHITE,
-        };
 
         for y in min_y..=max_y {
             for x in min_x..=max_x {
@@ -85,13 +130,13 @@ impl PaintApp {
                 let dy = y as f32 + 0.5 - center.y;
 
                 if dx * dx + dy * dy <= radius * radius {
-                    self.set_pixel(x, y, draw_color);
+                    self.set_pixel(x, y, color);
                 }
             }
         }
     }
 
-    fn draw_line(&mut self, from: Pos2, to: Pos2) {
+    fn draw_line(&mut self, from: Pos2, to: Pos2, color: Color32) {
         let dx = to.x - from.x;
         let dy = to.y - from.y;
         let distance = dx.hypot(dy);
@@ -100,24 +145,103 @@ impl PaintApp {
         for step in 0..=steps {
             let t = step as f32 / steps as f32;
             let point = Pos2::new(from.x + dx * t, from.y + dy * t);
-            self.draw_dot(point);
+            self.draw_dot(point, color);
         }
     }
 
-    fn canvas_position(response_rect: egui::Rect, pointer: Pos2) -> Option<Pos2> {
-        if !response_rect.contains(pointer) {
+    fn draw_shape(&mut self, start: Pos2, end: Pos2) {
+        match self.tool {
+            Tool::Line => self.draw_line(start, end, self.color),
+            Tool::Rectangle => self.draw_rectangle(start, end, self.color),
+            Tool::Ellipse => self.draw_ellipse(start, end, self.color),
+            _ => {}
+        }
+    }
+
+    fn draw_rectangle(&mut self, start: Pos2, end: Pos2, color: Color32) {
+        let left = start.x.min(end.x);
+        let right = start.x.max(end.x);
+        let top = start.y.min(end.y);
+        let bottom = start.y.max(end.y);
+
+        self.draw_line(Pos2::new(left, top), Pos2::new(right, top), color);
+        self.draw_line(Pos2::new(right, top), Pos2::new(right, bottom), color);
+        self.draw_line(Pos2::new(right, bottom), Pos2::new(left, bottom), color);
+        self.draw_line(Pos2::new(left, bottom), Pos2::new(left, top), color);
+    }
+
+    fn draw_ellipse(&mut self, start: Pos2, end: Pos2, color: Color32) {
+        let center = Pos2::new((start.x + end.x) / 2.0, (start.y + end.y) / 2.0);
+        let radius_x = (end.x - start.x).abs() / 2.0;
+        let radius_y = (end.y - start.y).abs() / 2.0;
+
+        if radius_x < 0.5 || radius_y < 0.5 {
+            self.draw_dot(center, color);
+            return;
+        }
+
+        let circumference = (radius_x + radius_y) * std::f32::consts::PI;
+        let steps = (circumference * 2.0).ceil().max(16.0) as usize;
+
+        let mut previous = Pos2::new(center.x + radius_x, center.y);
+
+        for i in 1..=steps {
+            let angle = std::f32::consts::TAU * i as f32 / steps as f32;
+            let point = Pos2::new(
+                center.x + radius_x * angle.cos(),
+                center.y + radius_y * angle.sin(),
+            );
+            self.draw_line(previous, point, color);
+            previous = point;
+        }
+    }
+
+    fn flood_fill(&mut self, start_x: i32, start_y: i32) {
+        if start_x < 0
+            || start_y < 0
+            || start_x >= self.canvas_width as i32
+            || start_y >= self.canvas_height as i32
+        {
+            return;
+        }
+
+        let target = self.pixel(start_x, start_y);
+        if target == self.color {
+            return;
+        }
+
+        let mut queue = VecDeque::new();
+        queue.push_back((start_x, start_y));
+        self.set_pixel(start_x, start_y, self.color);
+
+        while let Some((x, y)) = queue.pop_front() {
+            for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                if nx >= 0
+                    && ny >= 0
+                    && nx < self.canvas_width as i32
+                    && ny < self.canvas_height as i32
+                    && self.pixel(nx, ny) == target
+                {
+                    self.set_pixel(nx, ny, self.color);
+                    queue.push_back((nx, ny));
+                }
+            }
+        }
+    }
+
+    fn canvas_position(rect: egui::Rect, pointer: Pos2) -> Option<Pos2> {
+        if !rect.contains(pointer) {
             return None;
         }
 
-        let x = (pointer.x - response_rect.left())
-            * CANVAS_WIDTH as f32
-            / response_rect.width();
+        Some(Pos2::new(
+            (pointer.x - rect.left()) * 1.0,
+            (pointer.y - rect.top()) * 1.0,
+        ))
+    }
 
-        let y = (pointer.y - response_rect.top())
-            * CANVAS_HEIGHT as f32
-            / response_rect.height();
-
-        Some(Pos2::new(x, y))
+    fn canvas_to_screen(rect: egui::Rect, point: Pos2) -> Pos2 {
+        Pos2::new(rect.left() + point.x, rect.top() + point.y)
     }
 
     fn save_png(&self) {
@@ -131,14 +255,13 @@ impl PaintApp {
 
         let mut output =
             ImageBuffer::<Rgba<u8>, Vec<u8>>::new(
-                CANVAS_WIDTH as u32,
-                CANVAS_HEIGHT as u32,
+                self.canvas_width as u32,
+                self.canvas_height as u32,
             );
 
-        for y in 0..CANVAS_HEIGHT {
-            for x in 0..CANVAS_WIDTH {
-                let pixel = self.pixels[y * CANVAS_WIDTH + x];
-
+        for y in 0..self.canvas_height {
+            for x in 0..self.canvas_width {
+                let pixel = self.pixels[y * self.canvas_width + x];
                 output.put_pixel(
                     x as u32,
                     y as u32,
@@ -168,41 +291,73 @@ impl PaintApp {
             }
         };
 
-        self.pixels.fill(Color32::WHITE);
-
-        let copy_width = CANVAS_WIDTH.min(image.width() as usize);
-        let copy_height = CANVAS_HEIGHT.min(image.height() as usize);
-
-        for y in 0..copy_height {
-            for x in 0..copy_width {
-                let pixel = image.get_pixel(x as u32, y as u32);
-
-                self.pixels[y * CANVAS_WIDTH + x] =
-                    Color32::from_rgba_unmultiplied(
-                        pixel[0],
-                        pixel[1],
-                        pixel[2],
-                        pixel[3],
-                    );
-            }
-        }
+        self.canvas_width = image.width() as usize;
+        self.canvas_height = image.height() as usize;
+        self.pixels = image
+            .pixels()
+            .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
+            .collect();
 
         self.update_texture(ctx);
     }
 
     fn color_button(ui: &mut egui::Ui, color: Color32) -> bool {
-        let button = egui::Button::new("")
-            .fill(color)
-            .min_size(Vec2::splat(24.0));
+        ui.add(
+            egui::Button::new("")
+                .fill(color)
+                .min_size(Vec2::splat(24.0)),
+        )
+        .clicked()
+    }
 
-        ui.add(button).clicked()
+    fn draw_shape_preview(
+        &self,
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        start: Pos2,
+        end: Pos2,
+    ) {
+        let start = Self::canvas_to_screen(rect, start);
+        let end = Self::canvas_to_screen(rect, end);
+        let stroke = egui::Stroke::new(self.brush_size.max(1.0), self.color);
+
+        match self.tool {
+            Tool::Line => {
+                painter.line_segment([start, end], stroke);
+            }
+            Tool::Rectangle => {
+                painter.rect_stroke(
+                    egui::Rect::from_two_pos(start, end),
+                    0.0,
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
+            Tool::Ellipse => {
+                let center = Pos2::new((start.x + end.x) / 2.0, (start.y + end.y) / 2.0);
+                let radius = Vec2::new(
+                    (end.x - start.x).abs() / 2.0,
+                    (end.y - start.y).abs() / 2.0,
+                );
+                painter.add(egui::Shape::ellipse_stroke(
+                    center,
+                    radius,
+                    stroke,
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    fn is_shape_tool(&self) -> bool {
+        matches!(self.tool, Tool::Line | Tool::Rectangle | Tool::Ellipse)
     }
 }
 
 impl App for PaintApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("File:");
 
                 if ui.button("Open").clicked() {
@@ -214,39 +369,36 @@ impl App for PaintApp {
                 }
 
                 if ui.button("New").clicked() {
-                    self.clear();
+                    self.new_canvas(INITIAL_WIDTH, INITIAL_HEIGHT);
                     self.update_texture(ctx);
                 }
 
                 ui.separator();
+                ui.label("Tools:");
 
-                ui.label("Tool:");
+                let tools = [
+                    (Tool::Pencil, "Pencil"),
+                    (Tool::Eraser, "Eraser"),
+                    (Tool::ColorPicker, "Picker"),
+                    (Tool::Fill, "Fill"),
+                    (Tool::Line, "Line"),
+                    (Tool::Rectangle, "Rectangle"),
+                    (Tool::Ellipse, "Ellipse"),
+                ];
 
-                if ui
-                    .selectable_label(self.tool == Tool::Pencil, "Pencil")
-                    .clicked()
-                {
-                    self.tool = Tool::Pencil;
-                }
-
-                if ui
-                    .selectable_label(self.tool == Tool::Eraser, "Eraser")
-                    .clicked()
-                {
-                    self.tool = Tool::Eraser;
+                for (tool, label) in tools {
+                    if ui.selectable_label(self.tool == tool, label).clicked() {
+                        self.tool = tool;
+                    }
                 }
 
                 ui.separator();
-
                 ui.label("Size:");
-                ui.add(
-                    egui::Slider::new(&mut self.brush_size, 1.0..=64.0)
-                        .suffix(" px"),
-                );
+                ui.add(egui::Slider::new(&mut self.brush_size, 1.0..=64.0).suffix(" px"));
 
                 ui.separator();
-
                 ui.label("Color:");
+
                 for color in [
                     Color32::BLACK,
                     Color32::WHITE,
@@ -267,22 +419,23 @@ impl App for PaintApp {
                 }
 
                 ui.separator();
-                ui.label(format!(
-                    "{} × {}",
-                    CANVAS_WIDTH, CANVAS_HEIGHT
-                ));
+                ui.label(format!("{} × {}", self.canvas_width, self.canvas_height));
             });
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let available = ui.available_size();
             let canvas_size = Vec2::new(
-                available.x.min(CANVAS_WIDTH as f32),
-                available.y.min(CANVAS_HEIGHT as f32),
+                self.canvas_width as f32,
+                self.canvas_height as f32,
+            );
+            let display_size = Vec2::new(
+                canvas_size.x.min(available.x - RESIZE_HANDLE_SIZE),
+                canvas_size.y.min(available.y - RESIZE_HANDLE_SIZE),
             );
 
             let (response, painter) =
-                ui.allocate_painter(canvas_size, Sense::drag());
+                ui.allocate_painter(display_size, Sense::click_and_drag());
 
             let rect = response.rect;
 
@@ -290,31 +443,100 @@ impl App for PaintApp {
                 painter.image(
                     texture.id(),
                     rect,
-                    egui::Rect::from_min_max(
-                        Pos2::ZERO,
-                        Pos2::new(1.0, 1.0),
-                    ),
+                    egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                     Color32::WHITE,
                 );
             }
 
-            if response.drag_started() || response.dragged() {
-                if let Some(pointer) = response.interact_pointer_pos() {
-                    if let Some(canvas_pos) =
-                        Self::canvas_position(rect, pointer)
-                    {
-                        if response.drag_started() {
-                            self.draw_dot(canvas_pos);
-                        } else if let Some(previous) = self.last_canvas_pos {
-                            self.draw_line(previous, canvas_pos);
-                        }
+            if response.hovered() && !self.resizing {
+                ctx.set_cursor_icon(if self.is_shape_tool() {
+                    egui::CursorIcon::Crosshair
+                } else {
+                    egui::CursorIcon::Crosshair
+                });
+            }
 
+            if response.drag_started() {
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    if let Some(canvas_pos) = Self::canvas_position(rect, pointer) {
+                        self.drag_start = Some(canvas_pos);
                         self.last_canvas_pos = Some(canvas_pos);
-                        self.update_texture(ctx);
+
+                        match self.tool {
+                            Tool::ColorPicker => {
+                                let x = canvas_pos.x.floor() as i32;
+                                let y = canvas_pos.y.floor() as i32;
+                                if x >= 0
+                                    && y >= 0
+                                    && x < self.canvas_width as i32
+                                    && y < self.canvas_height as i32
+                                {
+                                    self.color = self.pixel(x, y);
+                                    self.tool = Tool::Pencil;
+                                }
+                            }
+                            Tool::Fill => {
+                                self.flood_fill(
+                                    canvas_pos.x.floor() as i32,
+                                    canvas_pos.y.floor() as i32,
+                                );
+                                self.update_texture(ctx);
+                            }
+                            Tool::Pencil => self.draw_dot(canvas_pos, self.color),
+                            Tool::Eraser => self.draw_dot(canvas_pos, Color32::WHITE),
+                            _ => {}
+                        }
                     }
                 }
-            } else {
+            }
+
+            if response.dragged() {
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    if let Some(canvas_pos) = Self::canvas_position(rect, pointer) {
+                        match self.tool {
+                            Tool::Pencil => {
+                                if let Some(previous) = self.last_canvas_pos {
+                                    self.draw_line(previous, canvas_pos, self.color);
+                                }
+                                self.last_canvas_pos = Some(canvas_pos);
+                                self.update_texture(ctx);
+                            }
+                            Tool::Eraser => {
+                                if let Some(previous) = self.last_canvas_pos {
+                                    self.draw_line(previous, canvas_pos, Color32::WHITE);
+                                }
+                                self.last_canvas_pos = Some(canvas_pos);
+                                self.update_texture(ctx);
+                            }
+                            Tool::Line | Tool::Rectangle | Tool::Ellipse => {}
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            if response.drag_stopped() {
+                if let Some(start) = self.drag_start.take() {
+                    if let Some(pointer) = response.interact_pointer_pos() {
+                        if let Some(end) = Self::canvas_position(rect, pointer) {
+                            if self.is_shape_tool() {
+                                self.draw_shape(start, end);
+                                self.update_texture(ctx);
+                            }
+                        }
+                    }
+                }
                 self.last_canvas_pos = None;
+            }
+
+            if self.is_shape_tool() {
+                if let (Some(start), Some(pointer)) =
+                    (self.drag_start, response.hover_pos())
+                {
+                    if let Some(end) = Self::canvas_position(rect, pointer) {
+                        self.draw_shape_preview(&painter, rect, start, end);
+                    }
+                }
             }
 
             painter.rect_stroke(
@@ -325,22 +547,74 @@ impl App for PaintApp {
             );
 
             if let Some(pointer) = response.hover_pos() {
-                if let Some(canvas_pos) =
-                    Self::canvas_position(rect, pointer)
-                {
-                    let radius = self.brush_size
-                        * rect.width()
-                        / CANVAS_WIDTH as f32
-                        / 2.0;
+                if let Some(canvas_pos) = Self::canvas_position(rect, pointer) {
+                    let radius = self.brush_size / 2.0;
+                    let screen_radius = radius.min(32.0);
 
-                    painter.circle_stroke(
-                        pointer,
-                        radius.max(1.0),
-                        egui::Stroke::new(1.0, Color32::BLACK),
-                    );
-
-                    let _ = canvas_pos;
+                    if matches!(self.tool, Tool::Pencil | Tool::Eraser) {
+                        painter.circle_stroke(
+                            Self::canvas_to_screen(rect, canvas_pos),
+                            screen_radius.max(1.0),
+                            egui::Stroke::new(1.0, Color32::BLACK),
+                        );
+                    }
                 }
+            }
+
+            let handle_rect = egui::Rect::from_min_size(
+                Pos2::new(rect.right() - RESIZE_HANDLE_SIZE, rect.bottom() - RESIZE_HANDLE_SIZE),
+                Vec2::splat(RESIZE_HANDLE_SIZE),
+            );
+
+            let handle_response = ui.interact(
+                handle_rect,
+                ui.id().with("canvas-resize"),
+                Sense::drag(),
+            );
+
+            painter.rect_filled(handle_rect, 0.0, Color32::from_gray(180));
+            painter.line_segment(
+                [
+                    Pos2::new(handle_rect.left() + 3.0, handle_rect.bottom() - 3.0),
+                    Pos2::new(handle_rect.right() - 3.0, handle_rect.top() + 3.0),
+                ],
+                egui::Stroke::new(1.0, Color32::DARK_GRAY),
+            );
+
+            if handle_response.drag_started() {
+                self.resizing = true;
+                self.resize_start = handle_response.interact_pointer_pos();
+                self.resize_original_size = Some((self.canvas_width, self.canvas_height));
+            }
+
+            if self.resizing {
+                if let (Some(start), Some(original), Some(pointer)) = (
+                    self.resize_start,
+                    self.resize_original_size,
+                    handle_response.interact_pointer_pos(),
+                ) {
+                    let width = (original.0 as f32 + pointer.x - start.x)
+                        .round()
+                        .max(MIN_CANVAS_SIZE as f32) as usize;
+                    let height = (original.1 as f32 + pointer.y - start.y)
+                        .round()
+                        .max(MIN_CANVAS_SIZE as f32) as usize;
+
+                    if width != self.canvas_width || height != self.canvas_height {
+                        self.resize_canvas(width, height);
+                        self.update_texture(ctx);
+                    }
+                }
+
+                if handle_response.drag_stopped() {
+                    self.resizing = false;
+                    self.resize_start = None;
+                    self.resize_original_size = None;
+                }
+            }
+
+            if handle_response.hovered() {
+                ctx.set_cursor_icon(egui::CursorIcon::ResizeNwSe);
             }
         });
     }
