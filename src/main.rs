@@ -24,6 +24,7 @@ enum Tool {
 enum BlendMode {
     Normal,
     Additive,
+    Subtractive,
 }
 
 #[derive(Clone)]
@@ -194,6 +195,16 @@ impl PaintApp {
                     a[0].saturating_add(b[0]),
                     a[1].saturating_add(b[1]),
                     a[2].saturating_add(b[2]),
+                    a[3].max(b[3]),
+                )
+            }
+            BlendMode::Subtractive => {
+                let a = behind.to_array();
+                let b = on_top.to_array();
+                Color32::from_rgba_premultiplied(
+                    a[0].saturating_sub(b[0]),
+                    a[1].saturating_sub(b[1]),
+                    a[2].saturating_sub(b[2]),
                     a[3].max(b[3]),
                 )
             }
@@ -567,6 +578,7 @@ impl App for PaintApp {
                 ui.label("Blend:");
                 ui.selectable_value(&mut self.blend_mode, BlendMode::Normal, "Normal");
                 ui.selectable_value(&mut self.blend_mode, BlendMode::Additive, "Additive");
+                ui.selectable_value(&mut self.blend_mode, BlendMode::Subtractive, "Subtractive");
 
                 ui.separator();
                 ui.label("Colors:");
