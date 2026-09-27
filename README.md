@@ -1,29 +1,31 @@
 # Sloppy Paint
 
-A small MS Paint-style drawing program written in Rust.
+A small Rust/egui paint program.
 
-## v0.1
+## V2 features
 
-- Window and drawing canvas
 - Pencil
 - Eraser
+- Color picker
+- Bucket/flood fill
+- Line tool
+- Rectangle tool
+- Ellipse tool
+- Brush size control
 - Color palette
-- Brush size from 1 to 64 pixels
+- Resizable canvas using the bottom-right drag handle
+- Canvas dimensions shown in the toolbar
+- PNG open/save
 - New canvas
-- Open PNG
-- Save PNG
-- Simple brush cursor
 
 ## Run
 
-```text
+```bash
 cargo run
 ```
 
-## Build release
+## Release build
 
-```text
+```bash
 cargo build --release
 ```
-
-The canvas is currently 1000 × 700 pixels. Images larger than the canvas are cropped when opened; smaller images are placed at the top-left on a white canvas.
