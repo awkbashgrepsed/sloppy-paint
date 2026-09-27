@@ -492,7 +492,7 @@ impl App for PaintApp {
 
             if response.dragged() {
                 if let Some(pointer) = response.interact_pointer_pos() {
-                    if let Some(canvas_pos) = Self::canvas_position(rect, pointer) {
+                    if let Some(canvas_pos) = Self::canvas_position(rect, pointer, self.canvas_width, self.canvas_height) {
                         match self.tool {
                             Tool::Pencil => {
                                 if let Some(previous) = self.last_canvas_pos {
@@ -518,7 +518,7 @@ impl App for PaintApp {
             if response.drag_stopped() {
                 if let Some(start) = self.drag_start.take() {
                     if let Some(pointer) = response.interact_pointer_pos() {
-                        if let Some(end) = Self::canvas_position(rect, pointer) {
+                        if let Some(end) = Self::canvas_position(rect, pointer, self.canvas_width, self.canvas_height) {
                             if self.is_shape_tool() {
                                 self.draw_shape(start, end);
                                 self.update_texture(ctx);
@@ -533,7 +533,7 @@ impl App for PaintApp {
                 if let (Some(start), Some(pointer)) =
                     (self.drag_start, response.hover_pos())
                 {
-                    if let Some(end) = Self::canvas_position(rect, pointer) {
+                    if let Some(end) = Self::canvas_position(rect, pointer, self.canvas_width, self.canvas_height) {
                         self.draw_shape_preview(&painter, rect, start, end);
                     }
                 }
@@ -547,7 +547,7 @@ impl App for PaintApp {
             );
 
             if let Some(pointer) = response.hover_pos() {
-                if let Some(canvas_pos) = Self::canvas_position(rect, pointer) {
+                if let Some(canvas_pos) = Self::canvas_position(rect, pointer, self.canvas_width, self.canvas_height) {
                     let radius = self.brush_size * scale / 2.0;
                     let screen_radius = radius.min(32.0);
 
