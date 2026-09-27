@@ -408,16 +408,10 @@ impl App for PaintApp {
                 ui.label("Colors:");
 
                 ui.label("L");
-                let left_picker = ui.color_edit_button_srgba(&mut self.left_color);
-                if left_picker.clicked() {
-                    self.left_color = left_picker.color;
-                }
+                ui.color_edit_button_srgba(&mut self.left_color);
 
                 ui.label("R");
-                let right_picker = ui.color_edit_button_srgba(&mut self.right_color);
-                if right_picker.clicked() {
-                    self.right_color = right_picker.color;
-                }
+                ui.color_edit_button_srgba(&mut self.right_color);
 
                 for color in [
                     Color32::BLACK,
