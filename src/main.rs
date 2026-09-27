@@ -20,6 +20,19 @@ enum Tool {
     Ellipse,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlendMode {
+    Normal,
+    Additive,
+}
+
+#[derive(Clone)]
+struct CanvasState {
+    pixels: Vec<Color32>,
+    width: usize,
+    height: usize,
+}
+
 struct PaintApp {
     pixels: Vec<Color32>,
     canvas_width: usize,
@@ -29,7 +42,11 @@ struct PaintApp {
     left_color: Color32,
     right_color: Color32,
     drag_color: Option<Color32>,
+    blend_mode: BlendMode,
     brush_size: f32,
+    zoom: f32,
+    undo_stack: Vec<CanvasState>,
+    redo_stack: Vec<CanvasState>,
     drag_start: Option<Pos2>,
     last_canvas_pos: Option<Pos2>,
     resizing: bool,
@@ -48,7 +65,11 @@ impl PaintApp {
             left_color: Color32::BLACK,
             right_color: Color32::WHITE,
             drag_color: None,
+            blend_mode: BlendMode::Normal,
             brush_size: 4.0,
+            zoom: 1.0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             drag_start: None,
             last_canvas_pos: None,
             resizing: false,
@@ -75,6 +96,48 @@ impl PaintApp {
                 egui::TextureOptions::NEAREST,
             ));
         }
+    }
+
+    fn canvas_state(&self) -> CanvasState {
+        CanvasState {
+            pixels: self.pixels.clone(),
+            width: self.canvas_width,
+            height: self.canvas_height,
+        }
+    }
+
+    fn begin_history(&mut self) {
+        self.undo_stack.push(self.canvas_state());
+        if self.undo_stack.len() > 32 {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    fn restore_state(&mut self, state: CanvasState) {
+        self.pixels = state.pixels;
+        self.canvas_width = state.width;
+        self.canvas_height = state.height;
+    }
+
+    fn undo(&mut self) -> bool {
+        let Some(previous) = self.undo_stack.pop() else {
+            return false;
+        };
+
+        self.redo_stack.push(self.canvas_state());
+        self.restore_state(previous);
+        true
+    }
+
+    fn redo(&mut self) -> bool {
+        let Some(next) = self.redo_stack.pop() else {
+            return false;
+        };
+
+        self.undo_stack.push(self.canvas_state());
+        self.restore_state(next);
+        true
     }
 
     fn clear(&mut self) {
@@ -121,6 +184,44 @@ impl PaintApp {
         self.pixels[y as usize * self.canvas_width + x as usize]
     }
 
+    fn blend_colors(&self, behind: Color32, on_top: Color32) -> Color32 {
+        match self.blend_mode {
+            BlendMode::Normal => behind.blend(on_top),
+            BlendMode::Additive => {
+                let a = behind.to_array();
+                let b = on_top.to_array();
+                Color32::from_rgba_premultiplied(
+                    a[0].saturating_add(b[0]),
+                    a[1].saturating_add(b[1]),
+                    a[2].saturating_add(b[2]),
+                    a[3].max(b[3]),
+                )
+            }
+        }
+    }
+
+    fn paint_pixel(&mut self, x: i32, y: i32, color: Color32) {
+        if x >= 0
+            && y >= 0
+            && x < self.canvas_width as i32
+            && y < self.canvas_height as i32
+        {
+            let index = y as usize * self.canvas_width + x as usize;
+            let existing = self.pixels[index];
+            self.pixels[index] = self.blend_colors(existing, color);
+        }
+    }
+
+    fn erase_pixel(&mut self, x: i32, y: i32) {
+        if x >= 0
+            && y >= 0
+            && x < self.canvas_width as i32
+            && y < self.canvas_height as i32
+        {
+            self.pixels[y as usize * self.canvas_width + x as usize] = Color32::TRANSPARENT;
+        }
+    }
+
     fn draw_dot(&mut self, center: Pos2, color: Color32) {
         let radius = self.brush_size / 2.0;
         let min_x = (center.x - radius - 1.0).floor() as i32;
@@ -134,7 +235,26 @@ impl PaintApp {
                 let dy = y as f32 + 0.5 - center.y;
 
                 if dx * dx + dy * dy <= radius * radius {
-                    self.set_pixel(x, y, color);
+                    self.paint_pixel(x, y, color);
+                }
+            }
+        }
+    }
+
+    fn erase_dot(&mut self, center: Pos2) {
+        let radius = self.brush_size / 2.0;
+        let min_x = (center.x - radius - 1.0).floor() as i32;
+        let max_x = (center.x + radius + 1.0).ceil() as i32;
+        let min_y = (center.y - radius - 1.0).floor() as i32;
+        let max_y = (center.y + radius + 1.0).ceil() as i32;
+
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let dx = x as f32 + 0.5 - center.x;
+                let dy = y as f32 + 0.5 - center.y;
+
+                if dx * dx + dy * dy <= radius * radius {
+                    self.erase_pixel(x, y);
                 }
             }
         }
@@ -150,6 +270,19 @@ impl PaintApp {
             let t = step as f32 / steps as f32;
             let point = Pos2::new(from.x + dx * t, from.y + dy * t);
             self.draw_dot(point, color);
+        }
+    }
+
+    fn erase_line(&mut self, from: Pos2, to: Pos2) {
+        let dx = to.x - from.x;
+        let dy = to.y - from.y;
+        let distance = dx.hypot(dy);
+        let steps = distance.ceil().max(1.0) as usize;
+
+        for step in 0..=steps {
+            let t = step as f32 / steps as f32;
+            let point = Pos2::new(from.x + dx * t, from.y + dy * t);
+            self.erase_dot(point);
         }
     }
 
@@ -216,7 +349,7 @@ impl PaintApp {
 
         let mut queue = VecDeque::new();
         queue.push_back((start_x, start_y));
-        self.set_pixel(start_x, start_y, color);
+        self.paint_pixel(start_x, start_y, color);
 
         while let Some((x, y)) = queue.pop_front() {
             for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
@@ -226,7 +359,7 @@ impl PaintApp {
                     && ny < self.canvas_height as i32
                     && self.pixel(nx, ny) == target
                 {
-                    self.set_pixel(nx, ny, color);
+                    self.paint_pixel(nx, ny, color);
                     queue.push_back((nx, ny));
                 }
             }
@@ -298,6 +431,7 @@ impl PaintApp {
             }
         };
 
+        self.begin_history();
         self.canvas_width = image.width() as usize;
         self.canvas_height = image.height() as usize;
         self.pixels = image
@@ -364,6 +498,22 @@ impl PaintApp {
 
 impl App for PaintApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+        let (undo_pressed, redo_pressed) = ctx.input(|input| {
+            (
+                input.modifiers.ctrl && input.key_pressed(egui::Key::Z),
+                (input.modifiers.ctrl && input.key_pressed(egui::Key::Y))
+                    || (input.modifiers.ctrl
+                        && input.modifiers.shift
+                        && input.key_pressed(egui::Key::Z)),
+            )
+        });
+
+        if undo_pressed && self.undo() {
+            self.update_texture(ctx);
+        } else if redo_pressed && self.redo() {
+            self.update_texture(ctx);
+        }
+
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label("File:");
@@ -377,7 +527,15 @@ impl App for PaintApp {
                 }
 
                 if ui.button("New").clicked() {
+                    self.begin_history();
                     self.new_canvas(INITIAL_WIDTH, INITIAL_HEIGHT);
+                    self.update_texture(ctx);
+                }
+
+                if ui.button("Undo").clicked() && self.undo() {
+                    self.update_texture(ctx);
+                }
+                if ui.button("Redo").clicked() && self.redo() {
                     self.update_texture(ctx);
                 }
 
@@ -403,6 +561,11 @@ impl App for PaintApp {
                 ui.separator();
                 ui.label("Size:");
                 ui.add(egui::Slider::new(&mut self.brush_size, 1.0..=64.0).suffix(" px"));
+
+                ui.separator();
+                ui.label("Blend:");
+                ui.selectable_value(&mut self.blend_mode, BlendMode::Normal, "Normal");
+                ui.selectable_value(&mut self.blend_mode, BlendMode::Additive, "Additive");
 
                 ui.separator();
                 ui.label("Colors:");
@@ -451,22 +614,52 @@ impl App for PaintApp {
                 ));
 
                 ui.separator();
+                ui.label("Zoom:");
+                if ui.button("−").clicked() {
+                    self.zoom = (self.zoom / 1.25).clamp(0.1, 8.0);
+                }
+                if ui.button("100%").clicked() {
+                    self.zoom = 1.0;
+                }
+                if ui.button("+").clicked() {
+                    self.zoom = (self.zoom * 1.25).clamp(0.1, 8.0);
+                }
+                ui.label(format!("{:.0}%", self.zoom * 100.0));
+
+                ui.separator();
                 ui.label(format!("{} × {}", self.canvas_width, self.canvas_height));
             });
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let available = ui.available_size();
-            let canvas_size = Vec2::new(self.canvas_width as f32, self.canvas_height as f32);
-            let max_width = (available.x - RESIZE_HANDLE_SIZE).max(1.0);
-            let max_height = (available.y - RESIZE_HANDLE_SIZE).max(1.0);
-            let scale = (max_width / canvas_size.x).min(max_height / canvas_size.y).min(1.0);
-            let display_size = canvas_size * scale;
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let canvas_size = Vec2::new(self.canvas_width as f32, self.canvas_height as f32);
+                    let scale = self.zoom;
+                    let display_size = canvas_size * scale;
 
-            let (response, painter) =
-                ui.allocate_painter(display_size, Sense::click_and_drag());
+                    let (response, painter) =
+                        ui.allocate_painter(display_size, Sense::click_and_drag());
 
             let rect = response.rect;
+
+            let checker_size = (16.0 * scale).max(4.0);
+            let cols = (rect.width() / checker_size).ceil() as i32;
+            let rows = (rect.height() / checker_size).ceil() as i32;
+            for y in 0..rows {
+                for x in 0..cols {
+                    let tile = egui::Rect::from_min_size(
+                        Pos2::new(
+                            rect.left() + x as f32 * checker_size,
+                            rect.top() + y as f32 * checker_size,
+                        ),
+                        Vec2::splat(checker_size),
+                    );
+                    let shade = if (x + y) % 2 == 0 { 230 } else { 200 };
+                    painter.rect_filled(tile, 0.0, Color32::from_gray(shade));
+                }
+            }
 
             if let Some(texture) = &self.texture {
                 painter.image(
@@ -497,13 +690,14 @@ impl App for PaintApp {
                             self.canvas_width,
                             self.canvas_height,
                         ) {
+                            self.begin_history();
                             self.drag_start = Some(canvas_pos);
                             self.last_canvas_pos = Some(canvas_pos);
                             self.drag_color = Some(color);
 
                             match self.tool {
                                 Tool::Pencil => self.draw_dot(canvas_pos, color),
-                                Tool::Eraser => self.draw_dot(canvas_pos, Color32::WHITE),
+                                Tool::Eraser => self.erase_dot(canvas_pos),
                                 _ => {}
                             }
                         }
@@ -544,6 +738,7 @@ impl App for PaintApp {
                                     }
                                 }
                                 Tool::Fill => {
+                                    self.begin_history();
                                     self.flood_fill(
                                         canvas_pos.x.floor() as i32,
                                         canvas_pos.y.floor() as i32,
@@ -580,7 +775,7 @@ impl App for PaintApp {
                                 }
                                 Tool::Eraser => {
                                     if let Some(previous) = self.last_canvas_pos {
-                                        self.draw_line(previous, canvas_pos, Color32::WHITE);
+                                        self.erase_line(previous, canvas_pos);
                                     }
                                     self.last_canvas_pos = Some(canvas_pos);
                                     self.update_texture(ctx);
@@ -672,6 +867,7 @@ impl App for PaintApp {
             );
 
             if handle_response.drag_started() {
+                self.begin_history();
                 self.resizing = true;
                 self.resize_start = handle_response.interact_pointer_pos();
                 self.resize_original_size = Some((self.canvas_width, self.canvas_height));
@@ -683,10 +879,10 @@ impl App for PaintApp {
                     self.resize_original_size,
                     handle_response.interact_pointer_pos(),
                 ) {
-                    let width = (original.0 as f32 + (pointer.x - start.x) / scale)
+                    let width = (original.0 as f32 + (pointer.x - start.x) / self.zoom)
                         .round()
                         .max(MIN_CANVAS_SIZE as f32) as usize;
-                    let height = (original.1 as f32 + (pointer.y - start.y) / scale)
+                    let height = (original.1 as f32 + (pointer.y - start.y) / self.zoom)
                         .round()
                         .max(MIN_CANVAS_SIZE as f32) as usize;
 
@@ -706,6 +902,7 @@ impl App for PaintApp {
             if handle_response.hovered() {
                 ctx.set_cursor_icon(egui::CursorIcon::ResizeNwSe);
             }
+                });
         });
     }
 }
