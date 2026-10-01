@@ -97,6 +97,10 @@ impl PaintApp {
             std::env::var_os("APPDATA")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."))
+        } else if cfg!(target_os = "macos") {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join("Library").join("Application Support"))
+                .unwrap_or_else(|| PathBuf::from("."))
         } else if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
             PathBuf::from(path)
         } else if let Some(home) = std::env::var_os("HOME") {
@@ -773,8 +777,12 @@ impl App for PaintApp {
                         Color32::from_rgb(255, 160, 224),
                         Color32::from_rgb(255, 255, 255),
                     ] {
-                        if Self::color_button(ui, color) {
+                        let response = Self::color_button(ui, color);
+                        if response.clicked_by(PointerButton::Primary) {
                             self.left_color = color;
+                        }
+                        if response.clicked_by(PointerButton::Secondary) {
+                            self.right_color = color;
                         }
                     }
                 });
