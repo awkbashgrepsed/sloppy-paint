@@ -53,6 +53,7 @@ struct PaintApp {
     resizing: bool,
     resize_start: Option<Pos2>,
     resize_original_size: Option<(usize, usize)>,
+    resize_preview_size: Option<(usize, usize)>,
 }
 
 impl PaintApp {
@@ -76,6 +77,7 @@ impl PaintApp {
             resizing: false,
             resize_start: None,
             resize_original_size: None,
+            resize_preview_size: None,
         };
 
         app.update_texture(&cc.egui_ctx);
@@ -600,19 +602,21 @@ impl App for PaintApp {
                 ui.label("Tools:");
 
                 let tools = [
-                    (Tool::Pencil, "Pencil"),
-                    (Tool::Eraser, "Eraser"),
-                    (Tool::ColorPicker, "Picker"),
-                    (Tool::Fill, "Fill"),
-                    (Tool::Line, "Line"),
-                    (Tool::Rectangle, "Rectangle"),
-                    (Tool::Ellipse, "Ellipse"),
+                    (Tool::Pencil, "✏", "Pencil"),
+                    (Tool::Eraser, "⌫", "Eraser"),
+                    (Tool::ColorPicker, "🎨", "Color picker"),
+                    (Tool::Fill, "🪣", "Fill"),
+                    (Tool::Line, "╱", "Line"),
+                    (Tool::Rectangle, "▣", "Rectangle"),
+                    (Tool::Ellipse, "◯", "Ellipse"),
                 ];
 
-                for (tool, label) in tools {
-                    if ui.selectable_label(self.tool == tool, label).clicked() {
+                for (tool, icon, tooltip) in tools {
+                    let response = ui.selectable_label(self.tool == tool, icon);
+                    if response.clicked() {
                         self.tool = tool;
                     }
+                    response.on_hover_text(tooltip);
                 }
 
                 ui.separator();
@@ -693,7 +697,9 @@ impl App for PaintApp {
             egui::ScrollArea::both()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    let canvas_size = Vec2::new(self.canvas_width as f32, self.canvas_height as f32);
+                    let (display_width, display_height) =
+                        self.resize_preview_size.unwrap_or((self.canvas_width, self.canvas_height));
+                    let canvas_size = Vec2::new(display_width as f32, display_height as f32);
                     let scale = self.zoom;
                     let display_size = canvas_size * scale;
 
@@ -720,9 +726,16 @@ impl App for PaintApp {
             }
 
             if let Some(texture) = &self.texture {
+                let image_rect = egui::Rect::from_min_size(
+                    rect.min,
+                    Vec2::new(
+                        self.canvas_width as f32 * scale,
+                        self.canvas_height as f32 * scale,
+                    ),
+                );
                 painter.image(
                     texture.id(),
-                    rect,
+                    image_rect,
                     egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                     Color32::WHITE,
                 );
@@ -925,10 +938,10 @@ impl App for PaintApp {
             );
 
             if handle_response.drag_started() {
-                self.begin_history();
                 self.resizing = true;
                 self.resize_start = handle_response.interact_pointer_pos();
                 self.resize_original_size = Some((self.canvas_width, self.canvas_height));
+                self.resize_preview_size = Some((self.canvas_width, self.canvas_height));
             }
 
             if self.resizing {
@@ -944,16 +957,22 @@ impl App for PaintApp {
                         .round()
                         .max(MIN_CANVAS_SIZE as f32) as usize;
 
-                    if width != self.canvas_width || height != self.canvas_height {
-                        self.resize_canvas(width, height);
-                        self.update_texture(ctx);
-                    }
+                    self.resize_preview_size = Some((width, height));
                 }
 
                 if handle_response.drag_stopped() {
+                    if let Some((width, height)) = self.resize_preview_size {
+                        if (width, height) != (self.canvas_width, self.canvas_height) {
+                            self.begin_history();
+                            self.resize_canvas(width, height);
+                            self.update_texture(ctx);
+                        }
+                    }
+
                     self.resizing = false;
                     self.resize_start = None;
                     self.resize_original_size = None;
+                    self.resize_preview_size = None;
                 }
             }
 
