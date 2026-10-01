@@ -598,13 +598,12 @@ impl PaintApp {
         self.update_texture(ctx);
     }
 
-    fn color_button(ui: &mut egui::Ui, color: Color32) -> bool {
+    fn color_button(ui: &mut egui::Ui, color: Color32) -> egui::Response {
         ui.add(
             egui::Button::new("")
                 .fill(color)
                 .min_size(Vec2::splat(24.0)),
         )
-        .clicked()
     }
 
     fn draw_shape_preview(
@@ -748,8 +747,12 @@ impl App for PaintApp {
                         Color32::BLUE,
                         Color32::from_rgb(128, 0, 255),
                     ] {
-                        if Self::color_button(ui, color) {
+                        let response = Self::color_button(ui, color);
+                        if response.clicked_by(PointerButton::Primary) {
                             self.left_color = color;
+                        }
+                        if response.clicked_by(PointerButton::Secondary) {
+                            self.right_color = color;
                         }
                     }
 
@@ -805,25 +808,38 @@ impl App for PaintApp {
                             } else {
                                 for (index, color) in self.custom_colors.clone().into_iter().enumerate() {
                                     let selected = self.custom_selected == Some(index);
-                                    let response = ui.selectable_label(
-                                        selected,
-                                        format!(
-                                            "  #{:02X}{:02X}{:02X}",
-                                            color.r(),
-                                            color.g(),
-                                            color.b()
-                                        ),
-                                    );
 
-                                    if response.clicked_by(PointerButton::Primary) {
-                                        self.custom_selected = Some(index);
-                                        self.left_color = color;
-                                    }
+                                    ui.horizontal(|ui| {
+                                        let swatch = ui.add(
+                                            egui::Button::new("")
+                                                .fill(color)
+                                                .min_size(Vec2::splat(20.0)),
+                                        );
 
-                                    if response.clicked_by(PointerButton::Secondary) {
-                                        self.custom_selected = Some(index);
-                                        self.right_color = color;
-                                    }
+                                        let label = ui.selectable_label(
+                                            selected,
+                                            format!(
+                                                "#{:02X}{:02X}{:02X}",
+                                                color.r(),
+                                                color.g(),
+                                                color.b()
+                                            ),
+                                        );
+
+                                        if swatch.clicked_by(PointerButton::Primary)
+                                            || label.clicked_by(PointerButton::Primary)
+                                        {
+                                            self.custom_selected = Some(index);
+                                            self.left_color = color;
+                                        }
+
+                                        if swatch.clicked_by(PointerButton::Secondary)
+                                            || label.clicked_by(PointerButton::Secondary)
+                                        {
+                                            self.custom_selected = Some(index);
+                                            self.right_color = color;
+                                        }
+                                    });
                                 }
                             }
 
