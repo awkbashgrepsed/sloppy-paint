@@ -3,6 +3,8 @@ use eframe::{App, CreationContext, Frame, NativeOptions};
 use image::{ImageBuffer, Rgba};
 use rfd::FileDialog;
 use std::collections::VecDeque;
+use std::fs;
+use std::path::PathBuf;
 
 const INITIAL_WIDTH: usize = 1000;
 const INITIAL_HEIGHT: usize = 700;
@@ -54,6 +56,9 @@ struct PaintApp {
     resize_start: Option<Pos2>,
     resize_original_size: Option<(usize, usize)>,
     resize_preview_size: Option<(usize, usize)>,
+    custom_colors: Vec<Color32>,
+    custom_selected: Option<usize>,
+    cursor_pos: Option<Pos2>,
 }
 
 impl PaintApp {
@@ -78,10 +83,102 @@ impl PaintApp {
             resize_start: None,
             resize_original_size: None,
             resize_preview_size: None,
+            custom_colors: Self::load_custom_colors(),
+            custom_selected: None,
+            cursor_pos: None,
         };
 
         app.update_texture(&cc.egui_ctx);
         app
+    }
+
+    fn custom_colors_path() -> PathBuf {
+        let config_dir = if cfg!(windows) {
+            std::env::var_os("APPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+        } else if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
+            PathBuf::from(path)
+        } else if let Some(home) = std::env::var_os("HOME") {
+            PathBuf::from(home).join(".config")
+        } else {
+            PathBuf::from(".")
+        };
+
+        config_dir.join("SloppyPaint").join("colors.txt")
+    }
+
+    fn load_custom_colors() -> Vec<Color32> {
+        let path = Self::custom_colors_path();
+        let Ok(contents) = fs::read_to_string(path) else {
+            return Vec::new();
+        };
+
+        contents.lines().filter_map(Self::parse_hex_color).collect()
+    }
+
+    fn parse_hex_color(value: &str) -> Option<Color32> {
+        let value = value.trim().trim_start_matches('#');
+
+        if value.len() != 6 {
+            return None;
+        }
+
+        let r = u8::from_str_radix(&value[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&value[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&value[4..6], 16).ok()?;
+
+        Some(Color32::from_rgb(r, g, b))
+    }
+
+    fn save_custom_colors(&self) {
+        let path = Self::custom_colors_path();
+
+        if let Some(parent) = path.parent() {
+            if let Err(error) = fs::create_dir_all(parent) {
+                eprintln!("Could not create color settings directory: {error}");
+                return;
+            }
+        }
+
+        let contents = self
+            .custom_colors
+            .iter()
+            .map(|color| format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if let Err(error) = fs::write(path, format!("{contents}\n")) {
+            eprintln!("Could not save custom colors: {error}");
+        }
+    }
+
+    fn add_custom_color(&mut self, color: Color32) {
+        if !self.custom_colors.contains(&color) {
+            self.custom_colors.push(color);
+            self.custom_selected = Some(self.custom_colors.len() - 1);
+            self.save_custom_colors();
+        }
+    }
+
+    fn delete_selected_custom_color(&mut self) {
+        if let Some(index) = self.custom_selected {
+            if index < self.custom_colors.len() {
+                self.custom_colors.remove(index);
+                self.custom_selected = if self.custom_colors.is_empty() {
+                    None
+                } else {
+                    Some(index.min(self.custom_colors.len() - 1))
+                };
+                self.save_custom_colors();
+            }
+        }
+    }
+
+    fn clear_custom_colors(&mut self) {
+        self.custom_colors.clear();
+        self.custom_selected = None;
+        self.save_custom_colors();
     }
 
     fn update_texture(&mut self, ctx: &egui::Context) {
@@ -574,124 +671,242 @@ impl App for PaintApp {
         }
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("File:");
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("File:");
 
-                if ui.button("Open").clicked() {
-                    self.open_png(ctx);
-                }
-
-                if ui.button("Save").clicked() {
-                    self.save_png();
-                }
-
-                if ui.button("New").clicked() {
-                    self.begin_history();
-                    self.new_canvas(INITIAL_WIDTH, INITIAL_HEIGHT);
-                    self.update_texture(ctx);
-                }
-
-                if ui.button("Undo").clicked() && self.undo() {
-                    self.update_texture(ctx);
-                }
-                if ui.button("Redo").clicked() && self.redo() {
-                    self.update_texture(ctx);
-                }
-
-                ui.separator();
-                ui.label("Tools:");
-
-                let tools = [
-                    (Tool::Pencil, "✏", "Pencil"),
-                    (Tool::Eraser, "⌫", "Eraser"),
-                    (Tool::ColorPicker, "🎨", "Color picker"),
-                    (Tool::Fill, "🪣", "Fill"),
-                    (Tool::Line, "╱", "Line"),
-                    (Tool::Rectangle, "▣", "Rectangle"),
-                    (Tool::Ellipse, "◯", "Ellipse"),
-                ];
-
-                for (tool, icon, tooltip) in tools {
-                    let response = ui.selectable_label(self.tool == tool, icon);
-                    if response.clicked() {
-                        self.tool = tool;
+                    if ui.button("Open").clicked() {
+                        self.open_png(ctx);
                     }
-                    response.on_hover_text(tooltip);
-                }
 
-                ui.separator();
-                ui.label("Size:");
-                ui.add(egui::Slider::new(&mut self.brush_size, 1.0..=64.0).suffix(" px"));
-
-                ui.separator();
-                ui.label("Blend:");
-                ui.selectable_value(&mut self.blend_mode, BlendMode::Normal, "Normal");
-                ui.selectable_value(&mut self.blend_mode, BlendMode::Additive, "Additive");
-                ui.selectable_value(&mut self.blend_mode, BlendMode::Subtractive, "Subtractive");
-
-                ui.separator();
-                ui.label("Colors:");
-
-                ui.label("L");
-                ui.color_edit_button_srgba(&mut self.left_color);
-
-                ui.label("R");
-                ui.color_edit_button_srgba(&mut self.right_color);
-
-                for color in [
-                    Color32::BLACK,
-                    Color32::WHITE,
-                    Color32::from_rgb(128, 128, 128),
-                    Color32::RED,
-                    Color32::from_rgb(255, 128, 0),
-                    Color32::YELLOW,
-                    Color32::GREEN,
-                    Color32::from_rgb(0, 160, 255),
-                    Color32::BLUE,
-                    Color32::from_rgb(128, 0, 255),
-                    Color32::from_rgb(255, 0, 128),
-                ] {
-                    let response = ui.add(
-                        egui::Button::new("")
-                            .fill(color)
-                            .min_size(Vec2::splat(20.0)),
-                    );
-                    if response.clicked_by(PointerButton::Primary) {
-                        self.left_color = color;
+                    if ui.button("Save").clicked() {
+                        self.save_png();
                     }
-                    if response.clicked_by(PointerButton::Secondary) {
-                        self.right_color = color;
+
+                    if ui.button("New").clicked() {
+                        self.begin_history();
+                        self.new_canvas(INITIAL_WIDTH, INITIAL_HEIGHT);
+                        self.update_texture(ctx);
                     }
-                }
+
+                    if ui.button("Undo").clicked() && self.undo() {
+                        self.update_texture(ctx);
+                    }
+
+                    if ui.button("Redo").clicked() && self.redo() {
+                        self.update_texture(ctx);
+                    }
+
+                    ui.separator();
+                    ui.label("Tools:");
+
+                    let tools = [
+                        (Tool::Pencil, "✏", "Pencil"),
+                        (Tool::Eraser, "⌫", "Eraser"),
+                        (Tool::ColorPicker, "🎨", "Color picker"),
+                        (Tool::Fill, "🪣", "Fill"),
+                        (Tool::Line, "╱", "Line"),
+                        (Tool::Rectangle, "▣", "Rectangle"),
+                        (Tool::Ellipse, "◯", "Ellipse"),
+                    ];
+
+                    for (tool, icon, tooltip) in tools {
+                        let response = ui.selectable_label(self.tool == tool, icon);
+                        if response.clicked() {
+                            self.tool = tool;
+                        }
+                        response.on_hover_text(tooltip);
+                    }
+
+                    ui.separator();
+                    ui.label("Size:");
+                    ui.add(egui::Slider::new(&mut self.brush_size, 1.0..=64.0).suffix(" px"));
+
+                    ui.separator();
+                    ui.label("Blend:");
+                    ui.selectable_value(&mut self.blend_mode, BlendMode::Normal, "Normal");
+                    ui.selectable_value(&mut self.blend_mode, BlendMode::Additive, "Additive");
+                    ui.selectable_value(&mut self.blend_mode, BlendMode::Subtractive, "Subtractive");
+                });
 
                 ui.separator();
-                ui.label(format!(
-                    "L: #{:02X}{:02X}{:02X}  R: #{:02X}{:02X}{:02X}",
-                    self.left_color.r(),
-                    self.left_color.g(),
-                    self.left_color.b(),
-                    self.right_color.r(),
-                    self.right_color.g(),
-                    self.right_color.b()
-                ));
 
-                ui.separator();
-                ui.label("Zoom:");
-                if ui.button("−").clicked() {
-                    self.zoom = (self.zoom / 1.25).clamp(0.1, 8.0);
-                }
-                if ui.button("100%").clicked() {
-                    self.zoom = 1.0;
-                }
-                if ui.button("+").clicked() {
-                    self.zoom = (self.zoom * 1.25).clamp(0.1, 8.0);
-                }
-                ui.label(format!("{:.0}%", self.zoom * 100.0));
+                ui.horizontal(|ui| {
+                    ui.label("Color 1:");
 
-                ui.separator();
-                ui.label(format!("{} × {}", self.canvas_width, self.canvas_height));
+                    for color in [
+                        Color32::BLACK,
+                        Color32::WHITE,
+                        Color32::from_rgb(128, 128, 128),
+                        Color32::from_rgb(192, 192, 192),
+                        Color32::from_rgb(128, 0, 0),
+                        Color32::RED,
+                        Color32::from_rgb(255, 128, 0),
+                        Color32::YELLOW,
+                        Color32::GREEN,
+                        Color32::from_rgb(0, 160, 255),
+                        Color32::BLUE,
+                        Color32::from_rgb(128, 0, 255),
+                    ] {
+                        if Self::color_button(ui, color) {
+                            self.left_color = color;
+                        }
+                    }
+
+                    ui.separator();
+                    ui.label("Color 2:");
+
+                    for color in [
+                        Color32::from_rgb(64, 64, 64),
+                        Color32::from_rgb(255, 192, 192),
+                        Color32::from_rgb(192, 128, 128),
+                        Color32::from_rgb(255, 160, 160),
+                        Color32::from_rgb(255, 192, 128),
+                        Color32::from_rgb(255, 255, 160),
+                        Color32::from_rgb(160, 255, 160),
+                        Color32::from_rgb(128, 224, 255),
+                        Color32::from_rgb(160, 192, 255),
+                        Color32::from_rgb(192, 160, 255),
+                        Color32::from_rgb(255, 160, 224),
+                        Color32::from_rgb(255, 255, 255),
+                    ] {
+                        if Self::color_button(ui, color) {
+                            self.left_color = color;
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Current:");
+
+                    ui.color_edit_button_srgba(&mut self.left_color);
+                    ui.color_edit_button_srgba(&mut self.right_color);
+
+                    ui.separator();
+                    ui.label("Custom:");
+
+                    egui::ComboBox::from_id_salt("custom_colors")
+                        .selected_text(
+                            self.custom_selected
+                                .and_then(|index| self.custom_colors.get(index))
+                                .map(|color| {
+                                    format!(
+                                        "#{:02X}{:02X}{:02X}",
+                                        color.r(),
+                                        color.g(),
+                                        color.b()
+                                    )
+                                })
+                                .unwrap_or_else(|| "Saved colors".to_owned()),
+                        )
+                        .show_ui(ui, |ui| {
+                            if self.custom_colors.is_empty() {
+                                ui.label("No saved colors");
+                            } else {
+                                for (index, color) in self.custom_colors.clone().into_iter().enumerate() {
+                                    let selected = self.custom_selected == Some(index);
+                                    let response = ui.selectable_label(
+                                        selected,
+                                        format!(
+                                            "  #{:02X}{:02X}{:02X}",
+                                            color.r(),
+                                            color.g(),
+                                            color.b()
+                                        ),
+                                    );
+
+                                    if response.clicked_by(PointerButton::Primary) {
+                                        self.custom_selected = Some(index);
+                                        self.left_color = color;
+                                    }
+
+                                    if response.clicked_by(PointerButton::Secondary) {
+                                        self.custom_selected = Some(index);
+                                        self.right_color = color;
+                                    }
+                                }
+                            }
+
+                            ui.separator();
+
+                            if ui.button("Save current left color").clicked() {
+                                self.add_custom_color(self.left_color);
+                            }
+
+                            if ui.button("Save current right color").clicked() {
+                                self.add_custom_color(self.right_color);
+                            }
+
+                            if self.custom_selected.is_some()
+                                && ui.button("Delete selected color").clicked()
+                            {
+                                self.delete_selected_custom_color();
+                            }
+
+                            if !self.custom_colors.is_empty()
+                                && ui.button("Clear all custom colors").clicked()
+                            {
+                                self.clear_custom_colors();
+                            }
+                        });
+
+                    ui.separator();
+                    ui.label(format!(
+                        "L: #{:02X}{:02X}{:02X}",
+                        self.left_color.r(),
+                        self.left_color.g(),
+                        self.left_color.b()
+                    ));
+                    ui.label(format!(
+                        "R: #{:02X}{:02X}{:02X}",
+                        self.right_color.r(),
+                        self.right_color.g(),
+                        self.right_color.b()
+                    ));
+                });
             });
         });
+
+        egui::TopBottomPanel::bottom("status_bar")
+            .exact_height(30.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if let Some(position) = self.cursor_pos {
+                        ui.label(format!(
+                            "Cursor: {}, {}",
+                            position.x.floor() as i32,
+                            position.y.floor() as i32
+                        ));
+                    } else {
+                        ui.label("Cursor: —");
+                    }
+
+                    ui.separator();
+                    ui.label("Selection: —");
+
+                    ui.separator();
+                    ui.label(format!(
+                        "Canvas: {} × {}",
+                        self.canvas_width, self.canvas_height
+                    ));
+
+                    ui.separator();
+
+                    if ui.button("−").clicked() {
+                        self.zoom = (self.zoom / 1.25).clamp(0.1, 8.0);
+                    }
+
+                    if ui.button("100%").clicked() {
+                        self.zoom = 1.0;
+                    }
+
+                    if ui.button("+").clicked() {
+                        self.zoom = (self.zoom * 1.25).clamp(0.1, 8.0);
+                    }
+
+                    ui.label(format!("{:.0}%", self.zoom * 100.0));
+                });
+            });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::both()
@@ -707,6 +922,15 @@ impl App for PaintApp {
                         ui.allocate_painter(display_size, Sense::click_and_drag());
 
             let rect = response.rect;
+
+            self.cursor_pos = response.hover_pos().and_then(|pointer| {
+                Self::canvas_position(
+                    rect,
+                    pointer,
+                    self.canvas_width,
+                    self.canvas_height,
+                )
+            });
 
             let checker_size = (16.0 * scale).max(4.0);
             let cols = (rect.width() / checker_size).ceil() as i32;
@@ -776,14 +1000,16 @@ impl App for PaintApp {
                 }
             };
 
-            begin_drag(PointerButton::Primary, left_color);
-            begin_drag(PointerButton::Secondary, right_color);
+            if !self.resizing {
+                begin_drag(PointerButton::Primary, left_color);
+                begin_drag(PointerButton::Secondary, right_color);
+            }
 
             for (button, color) in [
                 (PointerButton::Primary, self.left_color),
                 (PointerButton::Secondary, self.right_color),
             ] {
-                if response.clicked_by(button) {
+                if !self.resizing && response.clicked_by(button) {
                     if let Some(pointer) = response.interact_pointer_pos() {
                         if let Some(canvas_pos) = Self::canvas_position(
                             rect,
@@ -828,7 +1054,7 @@ impl App for PaintApp {
                 (PointerButton::Primary, self.left_color),
                 (PointerButton::Secondary, self.right_color),
             ] {
-                if response.dragged_by(button) {
+                if !self.resizing && response.dragged_by(button) {
                     if let Some(pointer) = response.interact_pointer_pos() {
                         if let Some(canvas_pos) = Self::canvas_position(
                             rect,
