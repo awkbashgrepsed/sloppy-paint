@@ -999,6 +999,7 @@ impl App for PaintApp {
 
             let left_color = self.left_color;
             let right_color = self.right_color;
+            let resizing = self.resizing;
 
             let mut begin_drag = |button: PointerButton, color: Color32| {
                 if response.drag_started_by(button) {
@@ -1024,7 +1025,7 @@ impl App for PaintApp {
                 }
             };
 
-            if !self.resizing {
+            if !resizing {
                 begin_drag(PointerButton::Primary, left_color);
                 begin_drag(PointerButton::Secondary, right_color);
             }
